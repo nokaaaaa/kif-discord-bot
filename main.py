@@ -155,7 +155,7 @@ def get_kif_from_shogi_extend(driver, user_id: str) -> str:
         write_browser_clipboard(driver, CLIPBOARD_SENTINEL)
         clipboard_before = CLIPBOARD_SENTINEL
     except RuntimeError as e:
-        clipboard_before = read_browser_clipboard(driver)
+        clipboard_before = CLIPBOARD_SENTINEL
         print(f"クリップボードの初期化をスキップします: {e}")
 
     try:
@@ -263,11 +263,18 @@ def grant_clipboard_permission(driver, url: str) -> None:
 
 
 def focus_browser_document(driver) -> None:
+    try:
+        driver.switch_to.window(driver.current_window_handle)
+        driver.execute_cdp_cmd("Page.bringToFront", {})
+    except WebDriverException:
+        pass
+
     driver.execute_script(
         """
         window.focus();
 
         if (document.body) {
+            document.body.setAttribute('tabindex', '-1');
             document.body.focus();
         }
         """
@@ -317,12 +324,22 @@ def read_browser_clipboard(driver) -> str:
 def wait_for_clipboard_change(driver, previous_text: str) -> str:
     deadline = time.monotonic() + CLIPBOARD_WAIT_SECONDS
     last_text = previous_text
+    last_error = None
 
     while time.monotonic() < deadline:
-        last_text = read_browser_clipboard(driver)
+        try:
+            last_text = read_browser_clipboard(driver)
+        except RuntimeError as e:
+            last_error = e
+            time.sleep(0.1)
+            continue
+
         if last_text.strip() and last_text != previous_text:
             return last_text
         time.sleep(0.1)
+
+    if last_error is not None and last_text == previous_text:
+        raise last_error
 
     return last_text
 
@@ -361,7 +378,7 @@ def get_kif_from_kishin(driver, url: str) -> str:
         write_browser_clipboard(driver, CLIPBOARD_SENTINEL)
         clipboard_before = CLIPBOARD_SENTINEL
     except RuntimeError as e:
-        clipboard_before = read_browser_clipboard(driver)
+        clipboard_before = CLIPBOARD_SENTINEL
         print(f"クリップボードの初期化をスキップします: {e}")
 
     print("棋譜を出力ボタンをクリックします...")
