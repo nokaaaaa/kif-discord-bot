@@ -899,8 +899,7 @@ def shogiwars_payload_to_kif(payload: str) -> str:
     if move_count == 0:
         raise RuntimeError("Shogi Warsの指し手をKIFへ変換できませんでした。")
 
-    method, result_line = shogiwars_result_lines(fields.get("result", ""), move_count)
-    lines.append(f"{move_count + 1:3d} {method}")
+    _method, result_line = shogiwars_result_lines(fields.get("result", ""), move_count)
     lines.append(result_line)
     return "\n".join(lines) + "\n"
 
@@ -967,8 +966,7 @@ def shogiwars_json_to_kif(game: dict) -> str:
     if move_count == 0:
         raise RuntimeError("Shogi Warsの指し手をKIFへ変換できませんでした。")
 
-    method, result_line = shogiwars_result_lines(str(game.get("result", "")), move_count)
-    lines.append(f"{move_count + 1:3d} {method}")
+    _method, result_line = shogiwars_result_lines(str(game.get("result", "")), move_count)
     lines.append(result_line)
     return "\n".join(lines) + "\n"
 
