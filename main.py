@@ -321,25 +321,30 @@ def make_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
+    options.add_argument("--remote-debugging-port=0")
 
     chrome_binary = find_chrome_binary()
     if not chrome_binary:
         raise RuntimeError(
-            "Chrome/Chromium が見つかりません。サーバーに Chromium をインストールするか、"
-            ".env に CHROME_BINARY=/path/to/chrome を設定してください。"
+            "Chrome/Chromium was not found. Install Chromium on the server, "
+            "or set CHROME_BINARY=/path/to/chrome in .env."
         )
 
-    if chrome_binary:
-        options.binary_location = chrome_binary
+    options.binary_location = chrome_binary
 
     service = Service(executable_path=CHROMEDRIVER_PATH) if CHROMEDRIVER_PATH else None
     try:
         driver = webdriver.Chrome(service=service, options=options)
     except WebDriverException as e:
+        driver_path = CHROMEDRIVER_PATH or "Selenium Manager"
         raise RuntimeError(
-            "ChromeDriver の起動に失敗しました。サーバーに Google Chrome または Chromium "
-            "がインストールされているか確認してください。必要なら .env に "
-            "CHROME_BINARY と CHROMEDRIVER_PATH を設定してください。"
+            "ChromeDriver failed to start.\n"
+            f"CHROME_BINARY={chrome_binary}\n"
+            f"CHROMEDRIVER_PATH={driver_path}\n"
+            f"Original error: {e}\n\n"
+            "If CHROME_BINARY is /snap/bin/chromium and CHROMEDRIVER_PATH is "
+            "/usr/bin/chromedriver, try removing CHROMEDRIVER_PATH from .env "
+            "so Selenium can choose a compatible driver."
         ) from e
     return driver
 
