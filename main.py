@@ -19,6 +19,8 @@ from selenium.webdriver.support import expected_conditions as EC
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+LISHOGI_USERNAME = os.getenv("LISHOGI_USERNAME")
+LISHOGI_PASSWORD = os.getenv("LISHOGI_PASSWORD")
 
 KISHIN_URL_RE = re.compile(
     r"https?://kishin-analytics\.heroz\.jp/[^\s<>]+"
@@ -129,11 +131,96 @@ def get_kif_from_kishin(driver, url: str) -> str:
     return copied
 
 
+def find_visible(driver, by: By, selector: str):
+    elements = driver.find_elements(by, selector)
+    for element in elements:
+        if element.is_displayed() and element.is_enabled():
+            return element
+    return None
+
+
+def find_first_visible_css(driver, selectors: list[str]):
+    for selector in selectors:
+        element = find_visible(driver, By.CSS_SELECTOR, selector)
+        if element is not None:
+            return element
+    return None
+
+
+def login_to_lishogi(driver) -> None:
+    """
+    lishogi にログインする。ログイン済みの場合は何もしない。
+    """
+    if not LISHOGI_USERNAME or not LISHOGI_PASSWORD:
+        raise RuntimeError(".env に LISHOGI_USERNAME と LISHOGI_PASSWORD を設定してください。")
+
+    print("lishogi login page を開いています...")
+    driver.get("https://lishogi.org/login")
+
+    wait = WebDriverWait(driver, 20)
+
+    if "/login" not in urlparse(driver.current_url).path:
+        print("lishogi はすでにログイン済みです。")
+        return
+
+    username_selectors = [
+        "input[name='username']",
+        "input[name='usernameOrEmail']",
+        "input[autocomplete='username']",
+        "input[type='text']",
+        "input[type='email']",
+    ]
+    password_selectors = [
+        "input[name='password']",
+        "input[autocomplete='current-password']",
+        "input[type='password']",
+    ]
+
+    username_input = wait.until(
+        lambda d: find_first_visible_css(d, username_selectors)
+    )
+    password_input = wait.until(
+        lambda d: find_first_visible_css(d, password_selectors)
+    )
+
+    username_input.clear()
+    username_input.send_keys(LISHOGI_USERNAME)
+
+    password_input.clear()
+    password_input.send_keys(LISHOGI_PASSWORD)
+
+    submit_button = wait.until(
+        lambda d: find_visible(d, By.CSS_SELECTOR, "button[type='submit']")
+    )
+
+    before_path = urlparse(driver.current_url).path
+    ActionChains(driver).move_to_element(submit_button).click().perform()
+
+    print("lishogi のログイン完了を待っています...")
+
+    def login_finished(d):
+        current_path = urlparse(d.current_url).path
+        visible_password = find_visible(d, By.CSS_SELECTOR, "input[type='password']")
+        return current_path != before_path or visible_password is None
+
+    wait.until(login_finished)
+
+    if "/login" in urlparse(driver.current_url).path:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        if "Authentication code" in body_text or "two-factor" in body_text.lower():
+            raise RuntimeError("lishogi の二要素認証が必要です。自動ログインできませんでした。")
+        raise RuntimeError("lishogi へのログインに失敗しました。ユーザー名またはパスワードを確認してください。")
+
+    print("lishogi にログインしました。")
+
+
 def import_kif_to_lishogi(driver, kif_text: str) -> str:
     """
     lishogi の Import game ページに KIF を貼り付け、
     インポート後のURLを返す。
     """
+    login_to_lishogi(driver)
+
     print("lishogiのインポートページを開いています...")
     driver.get("https://lishogi.org/paste")
 
@@ -278,6 +365,8 @@ async def on_message(message: discord.Message):
 def main():
     if not DISCORD_TOKEN:
         raise RuntimeError(".env に DISCORD_TOKEN が設定されていません。")
+    if not LISHOGI_USERNAME or not LISHOGI_PASSWORD:
+        raise RuntimeError(".env に LISHOGI_USERNAME と LISHOGI_PASSWORD を設定してください。")
 
     client.run(DISCORD_TOKEN)
 
