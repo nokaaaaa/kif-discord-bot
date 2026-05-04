@@ -44,11 +44,14 @@ CHROME_BINARY_PATH_CANDIDATES = (
 )
 
 KISHIN_URL_RE = re.compile(
-    r"https?://kishin-analytics\.heroz\.jp/[^\s<>]+"
+    r"(?:https?://)?kishin-analytics\.heroz\.jp(?:/[^\s<>]*)?"
 )
 
 
 def is_kishin_url(url: str) -> bool:
+    if not re.match(r"https?://", url):
+        url = f"https://{url}"
+
     parsed = urlparse(url)
     return (
         parsed.scheme in ("http", "https")
@@ -63,6 +66,9 @@ def extract_kishin_url(text: str) -> str | None:
 
     url = match.group(0).strip()
     url = url.rstrip(".,、。)）]］>")
+
+    if not re.match(r"https?://", url):
+        url = f"https://{url}"
 
     if not is_kishin_url(url):
         return None
