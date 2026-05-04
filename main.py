@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import shutil
+import tempfile
 import time
 import traceback
 from urllib.parse import urlparse
@@ -314,6 +315,8 @@ def import_kif_to_lishogi(driver, kif_text: str) -> str:
 
 def make_driver():
     options = Options()
+    user_data_dir = tempfile.mkdtemp(prefix="kishin-chrome-")
+
     options.add_argument("--window-size=1280,900")
     options.add_argument("--window-position=0,0")
 
@@ -321,7 +324,10 @@ def make_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--no-first-run")
     options.add_argument("--remote-debugging-port=0")
+    options.add_argument(f"--user-data-dir={user_data_dir}")
 
     chrome_binary = find_chrome_binary()
     if not chrome_binary:
@@ -335,12 +341,15 @@ def make_driver():
     service = Service(executable_path=CHROMEDRIVER_PATH) if CHROMEDRIVER_PATH else None
     try:
         driver = webdriver.Chrome(service=service, options=options)
+        driver._kishin_user_data_dir = user_data_dir
     except WebDriverException as e:
+        shutil.rmtree(user_data_dir, ignore_errors=True)
         driver_path = CHROMEDRIVER_PATH or "Selenium Manager"
         raise RuntimeError(
             "ChromeDriver failed to start.\n"
             f"CHROME_BINARY={chrome_binary}\n"
             f"CHROMEDRIVER_PATH={driver_path}\n"
+            f"CHROME_USER_DATA_DIR={user_data_dir}\n"
             f"Original error: {e}\n\n"
             "If CHROME_BINARY is /snap/bin/chromium and CHROMEDRIVER_PATH is "
             "/usr/bin/chromedriver, try removing CHROMEDRIVER_PATH from .env "
@@ -377,7 +386,10 @@ def kishin_url_to_lishogi_url(url: str) -> str:
         return lishogi_url
 
     finally:
+        user_data_dir = getattr(driver, "_kishin_user_data_dir", None)
         driver.quit()
+        if user_data_dir:
+            shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
 intents = discord.Intents.default()
