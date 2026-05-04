@@ -25,7 +25,6 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 LISHOGI_USERNAME = os.getenv("LISHOGI_USERNAME")
 LISHOGI_PASSWORD = os.getenv("LISHOGI_PASSWORD")
 USER_ID = os.getenv("USER_ID")
-PASSWORD = os.getenv("PASSWORD")
 CHROME_BINARY = os.getenv("CHROME_BINARY")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH")
 
@@ -52,12 +51,9 @@ KISHIN_URL_RE = re.compile(
 CLIPBOARD_SENTINEL = "__KISHIN_DISCORD_BOT_EMPTY_CLIPBOARD__"
 
 
-def build_shogiwars_history_url(user_id: str) -> str:
+def build_shogi_extend_search_url(user_id: str) -> str:
     encoded_user_id = quote(user_id, safe="")
-    return (
-        "https://shogiwars.heroz.jp/games/history"
-        f"?gtype=&init_pos_type=normal&locale=ja&user_id={encoded_user_id}"
-    )
+    return f"https://www.shogi-extend.com/swars/search?query={encoded_user_id}"
 
 
 def is_kishin_url(url: str) -> bool:
@@ -88,179 +84,22 @@ def extract_kishin_url(text: str) -> str | None:
     return url
 
 
-def find_topmost_kishin_url_on_history(driver, history_url: str) -> str:
-    """
-    Shogi Wars の履歴ページから、画面上の y 座標が一番小さい Kishin ボタンのURLを返す。
-    """
-    print("Shogi Wars の履歴ページを開いています...")
-    driver.get(history_url)
-
-    wait = WebDriverWait(driver, 20)
-    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-
-    if "/loginm" in urlparse(driver.current_url).path:
-        login_to_shogiwars(driver, history_url)
-
-    time.sleep(3.0)
-
-    scroll_height = driver.execute_script(
-        "return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);"
-    )
-    for y in range(0, int(scroll_height or 0), 700):
-        driver.execute_script("window.scrollTo(0, arguments[0]);", y)
-        time.sleep(0.2)
-    driver.execute_script("window.scrollTo(0, 0);")
-
-    try:
-        candidates = WebDriverWait(driver, 10).until(collect_kishin_candidates_on_page)
-    except TimeoutException as e:
-        debug = driver.execute_script(
-            """
-            return {
-                url: location.href,
-                title: document.title,
-                bodyText: (document.body && document.body.innerText || '').slice(0, 500),
-                linkCount: document.links.length,
-                buttonCount: document.querySelectorAll('button, [role="button"]').length,
-                htmlHasKishin: document.documentElement.outerHTML.includes('kishin'),
-                htmlHasAnalytics: document.documentElement.outerHTML.includes('kishin-analytics.heroz.jp')
-            };
-            """
-        )
-        raise RuntimeError(
-            "Shogi Wars の履歴ページで Kishin Analytics に飛べるボタンが見つかりませんでした。"
-            f" ページ状態: {debug}"
-        ) from e
-
-    candidates = [
-        {
-            **candidate,
-            "url": extract_kishin_url(candidate["url"]),
-        }
-        for candidate in candidates
-    ]
-    candidates = [candidate for candidate in candidates if candidate["url"]]
-
-    if not candidates:
-        raise RuntimeError(
-            "Shogi Wars の履歴ページで Kishin Analytics に飛べるボタンが見つかりませんでした。"
-        )
-
-    target = min(candidates, key=lambda candidate: (candidate["y"], candidate["x"], candidate["index"]))
-    print("選択した Kishin ボタン:", target)
-    return target["url"]
-
-
-def login_to_shogiwars(driver, after_login_url: str) -> None:
-    """
-    Shogi Wars にログインし、ログイン後に指定URLを開き直す。
-    """
-    if not USER_ID or not PASSWORD:
-        raise RuntimeError(".env に USER_ID と PASSWORD を設定してください。")
-
-    print("Shogi Wars にログインします...")
-    wait = WebDriverWait(driver, 20)
-
-    username_selectors = [
-        "input[name='user_id']",
-        "input[name='userid']",
-        "input[name='login_id']",
-        "input[name='id']",
-        "input[autocomplete='username']",
-        "input[type='text']",
-        "input[type='email']",
-    ]
-    password_selectors = [
-        "input[name='password']",
-        "input[autocomplete='current-password']",
-        "input[type='password']",
-    ]
-
-    username_input = wait.until(lambda d: find_first_visible_css(d, username_selectors))
-    password_input = wait.until(lambda d: find_first_visible_css(d, password_selectors))
-
-    username_input.clear()
-    username_input.send_keys(USER_ID)
-
-    password_input.clear()
-    password_input.send_keys(PASSWORD)
-
-    submit_selectors = [
-        "button[type='submit']",
-        "input[type='submit']",
-        "input[type='image']",
-        "button",
-        "[role='button']",
-    ]
-    submit_button = find_first_visible_css(driver, submit_selectors)
-    before_url = driver.current_url
-
-    if submit_button is not None:
-        ActionChains(driver).move_to_element(submit_button).click().perform()
-    else:
-        driver.execute_script(
-            """
-            const input = arguments[0];
-            const form = input.form || document.querySelector('form');
-            if (!form) {
-                throw new Error('login form was not found');
-            }
-            form.submit();
-            """,
-            password_input,
-        )
-
-    print("Shogi Wars のログイン完了を待っています...")
-
-    def login_finished(d):
-        current_path = urlparse(d.current_url).path
-        visible_password = find_visible(d, By.CSS_SELECTOR, "input[type='password']")
-        return current_path != "/loginm" or d.current_url != before_url or visible_password is None
-
-    try:
-        wait.until(login_finished)
-    except TimeoutException as e:
-        body_text = driver.find_element(By.TAG_NAME, "body").text[:500]
-        raise RuntimeError(
-            "Shogi Wars のログイン完了を待ちましたが、ログインページから移動しませんでした。"
-            " USER_ID と PASSWORD を確認してください。"
-            f" ページ内容: {body_text}"
-        ) from e
-
-    if "/loginm" in urlparse(driver.current_url).path:
-        body_text = driver.find_element(By.TAG_NAME, "body").text[:500]
-        raise RuntimeError(
-            "Shogi Wars へのログインに失敗しました。USER_ID と PASSWORD を確認してください。"
-            f" ページ内容: {body_text}"
-        )
-
-    driver.get(after_login_url)
-    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-    print("Shogi Wars にログインしました。")
-
-
-def collect_kishin_candidates_on_page(driver):
+def find_topmost_copy_button(driver):
     return driver.execute_script(
         """
-        const re = /(?:https?:\\/\\/)?kishin-analytics\\.heroz\\.jp(?:\\/[^\\s"'<>)]*)?(?:\\?[^\\s"'<>)]*)?/;
-        const elements = Array.from(document.querySelectorAll('*'));
+        const elements = Array.from(document.querySelectorAll(
+            'button, [role="button"], a, input[type="button"], input[type="submit"]'
+        ));
 
-        return elements.flatMap((element, index) => {
-            const attrs = Array.from(element.attributes || [], attr => attr.value);
-            const source = [
-                element.href || '',
-                element.getAttribute('href') || '',
-                element.getAttribute('onclick') || '',
+        const candidates = elements.flatMap((element, index) => {
+            const label = [
+                element.innerText || '',
+                element.value || '',
                 element.getAttribute('aria-label') || '',
-                ...attrs,
-            ].join(' ');
-            const normalizedSource = source
-                .replaceAll('\\\\/', '/')
-                .replaceAll('&amp;', '&')
-                .replaceAll('&quot;', '"');
-            const match = normalizedSource.match(re);
+                element.getAttribute('title') || ''
+            ].join(' ').trim();
 
-            if (!match) {
+            if (!label.includes('コピー')) {
                 return [];
             }
 
@@ -277,16 +116,76 @@ def collect_kishin_candidates_on_page(driver):
             }
 
             return [{
-                url: match[0],
+                element,
                 x: rect.left + window.scrollX,
                 y: rect.top + window.scrollY,
                 index,
-                tagName: element.tagName,
-                text: (element.innerText || element.getAttribute('aria-label') || '').slice(0, 80)
+                label
             }];
         });
+
+        candidates.sort((a, b) => a.y - b.y || a.x - b.x || a.index - b.index);
+        return candidates[0] || null;
         """
     )
+
+
+def get_kif_from_shogi_extend(driver, user_id: str) -> str:
+    """
+    shogi-extend の検索結果で一番上にある『コピー』ボタンを押し、KIFを取得する。
+    """
+    search_url = build_shogi_extend_search_url(user_id)
+    print("shogi-extend の検索ページを開いています...")
+    driver.get(search_url)
+
+    wait = WebDriverWait(driver, 20)
+    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    grant_clipboard_permission(driver, search_url)
+
+    try:
+        write_browser_clipboard(driver, CLIPBOARD_SENTINEL)
+    except RuntimeError as e:
+        print(f"クリップボードの初期化をスキップします: {e}")
+
+    time.sleep(2.0)
+
+    try:
+        target = wait.until(find_topmost_copy_button)
+    except TimeoutException as e:
+        debug = driver.execute_script(
+            """
+            return {
+                url: location.href,
+                title: document.title,
+                bodyText: (document.body && document.body.innerText || '').slice(0, 500),
+                buttonCount: document.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]').length,
+                copyTextCount: (document.body && document.body.innerText || '').split('コピー').length - 1
+            };
+            """
+        )
+        raise RuntimeError(
+            "shogi-extend の検索結果で『コピー』ボタンが見つかりませんでした。"
+            f" ページ状態: {debug}"
+        ) from e
+
+    print("押すshogi-extendコピーボタン:", {key: target[key] for key in ("x", "y", "index", "label")})
+    ActionChains(driver).move_to_element(target["element"]).click().perform()
+    time.sleep(1.0)
+
+    copied = read_browser_clipboard(driver)
+    print("クリップボード文字数:", len(copied))
+
+    if not copied.strip():
+        raise RuntimeError("クリップボードが空です。コピーに失敗しました。")
+
+    if copied.strip() == CLIPBOARD_SENTINEL or not is_kif_text(copied):
+        preview = copied.strip().replace("\n", "\\n")[:200]
+        raise RuntimeError(
+            "shogi-extendからKIFをコピーできませんでした。"
+            f"KIFではない内容を検出したため中止します。内容: {preview}"
+        )
+
+    return copied
 
 
 def click_export_kifu_button(driver):
@@ -708,16 +607,14 @@ def kishin_url_to_lishogi_url(url: str) -> str:
             shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
-def shogiwars_history_to_lishogi_url(user_id: str) -> str:
+def shogi_extend_to_lishogi_url(user_id: str) -> str:
     """
-    Shogi Wars 履歴 → 一番上の棋神URL → KIF取得 → lishogiインポート → lishogi URL返却
+    shogi-extend検索 → 一番上のコピーでKIF取得 → lishogiインポート → lishogi URL返却
     """
     driver = make_driver()
 
     try:
-        history_url = build_shogiwars_history_url(user_id)
-        kishin_url = find_topmost_kishin_url_on_history(driver, history_url)
-        kif_text = get_kif_from_kishin(driver, kishin_url)
+        kif_text = get_kif_from_shogi_extend(driver, user_id)
         lishogi_url = import_kif_to_lishogi(driver, kif_text)
         return lishogi_url
 
@@ -750,10 +647,10 @@ async def on_message(message: discord.Message):
         return
 
     async with selenium_lock:
-        await message.channel.send("Shogi Warsの履歴から棋神ボタンを探して、lishogiに読み込ませています...")
+        await message.channel.send("shogi-extendから棋譜をコピーして、lishogiに読み込ませています...")
 
         try:
-            lishogi_url = await asyncio.to_thread(shogiwars_history_to_lishogi_url, USER_ID)
+            lishogi_url = await asyncio.to_thread(shogi_extend_to_lishogi_url, USER_ID)
 
             await message.reply(
                 content=f"lishogiに読み込みました。\n{lishogi_url}",
@@ -776,8 +673,6 @@ def main():
         raise RuntimeError(".env に LISHOGI_USERNAME と LISHOGI_PASSWORD を設定してください。")
     if not USER_ID:
         raise RuntimeError(".env に USER_ID を設定してください。")
-    if not PASSWORD:
-        raise RuntimeError(".env に PASSWORD を設定してください。")
 
     client.run(DISCORD_TOKEN)
 
