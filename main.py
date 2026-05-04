@@ -10,7 +10,7 @@ from urllib.parse import quote, urlparse
 import discord
 from dotenv import load_dotenv
 from selenium import webdriver
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
@@ -96,48 +96,36 @@ def find_topmost_kishin_url_on_history(driver, history_url: str) -> str:
 
     wait = WebDriverWait(driver, 20)
     wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    time.sleep(3.0)
 
-    candidates = wait.until(
-        lambda d: d.execute_script(
+    scroll_height = driver.execute_script(
+        "return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);"
+    )
+    for y in range(0, int(scroll_height or 0), 700):
+        driver.execute_script("window.scrollTo(0, arguments[0]);", y)
+        time.sleep(0.2)
+    driver.execute_script("window.scrollTo(0, 0);")
+
+    try:
+        candidates = WebDriverWait(driver, 10).until(collect_kishin_candidates_on_page)
+    except TimeoutException as e:
+        debug = driver.execute_script(
             """
-            const re = /(?:https?:\\/\\/)?kishin-analytics\\.heroz\\.jp(?:\\/[^\\s"'<>]*)?(?:\\?[^\\s"'<>]*)?/;
-            const elements = Array.from(document.querySelectorAll(
-                'a[href*="kishin-analytics.heroz.jp"], button, [role="button"], [onclick]'
-            ));
-
-            return elements.flatMap((element, index) => {
-                const href = element.getAttribute('href') || '';
-                const onclick = element.getAttribute('onclick') || '';
-                const html = element.outerHTML || '';
-                const source = `${href} ${onclick} ${html}`;
-                const match = source.match(re);
-
-                if (!match) {
-                    return [];
-                }
-
-                const rect = element.getBoundingClientRect();
-                const style = window.getComputedStyle(element);
-                const visible = rect.width > 0
-                    && rect.height > 0
-                    && style.visibility !== 'hidden'
-                    && style.display !== 'none';
-
-                if (!visible) {
-                    return [];
-                }
-
-                return [{
-                    url: match[0],
-                    x: rect.left + window.scrollX,
-                    y: rect.top + window.scrollY,
-                    index,
-                    text: element.innerText || element.getAttribute('aria-label') || ''
-                }];
-            });
+            return {
+                url: location.href,
+                title: document.title,
+                bodyText: (document.body && document.body.innerText || '').slice(0, 500),
+                linkCount: document.links.length,
+                buttonCount: document.querySelectorAll('button, [role="button"]').length,
+                htmlHasKishin: document.documentElement.outerHTML.includes('kishin'),
+                htmlHasAnalytics: document.documentElement.outerHTML.includes('kishin-analytics.heroz.jp')
+            };
             """
         )
-    )
+        raise RuntimeError(
+            "Shogi Wars の履歴ページで Kishin Analytics に飛べるボタンが見つかりませんでした。"
+            f" ページ状態: {debug}"
+        ) from e
 
     candidates = [
         {
@@ -156,6 +144,56 @@ def find_topmost_kishin_url_on_history(driver, history_url: str) -> str:
     target = min(candidates, key=lambda candidate: (candidate["y"], candidate["x"], candidate["index"]))
     print("選択した Kishin ボタン:", target)
     return target["url"]
+
+
+def collect_kishin_candidates_on_page(driver):
+    return driver.execute_script(
+        """
+        const re = /(?:https?:\\/\\/)?kishin-analytics\\.heroz\\.jp(?:\\/[^\\s"'<>)]*)?(?:\\?[^\\s"'<>)]*)?/;
+        const elements = Array.from(document.querySelectorAll('*'));
+
+        return elements.flatMap((element, index) => {
+            const attrs = Array.from(element.attributes || [], attr => attr.value);
+            const source = [
+                element.href || '',
+                element.getAttribute('href') || '',
+                element.getAttribute('onclick') || '',
+                element.getAttribute('aria-label') || '',
+                ...attrs,
+            ].join(' ');
+            const normalizedSource = source
+                .replaceAll('\\\\/', '/')
+                .replaceAll('&amp;', '&')
+                .replaceAll('&quot;', '"');
+            const match = normalizedSource.match(re);
+
+            if (!match) {
+                return [];
+            }
+
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            const visible = rect.width > 0
+                && rect.height > 0
+                && style.visibility !== 'hidden'
+                && style.display !== 'none'
+                && Number(style.opacity || '1') > 0;
+
+            if (!visible) {
+                return [];
+            }
+
+            return [{
+                url: match[0],
+                x: rect.left + window.scrollX,
+                y: rect.top + window.scrollY,
+                index,
+                tagName: element.tagName,
+                text: (element.innerText || element.getAttribute('aria-label') || '').slice(0, 80)
+            }];
+        });
+        """
+    )
 
 
 def click_export_kifu_button(driver):
