@@ -138,7 +138,21 @@ def grant_clipboard_permission(driver, url: str) -> None:
     )
 
 
+def focus_browser_document(driver) -> None:
+    driver.execute_script(
+        """
+        window.focus();
+
+        if (document.body) {
+            document.body.focus();
+        }
+        """
+    )
+
+
 def write_browser_clipboard(driver, text: str) -> None:
+    focus_browser_document(driver)
+
     error = driver.execute_async_script(
         """
         const text = arguments[0];
@@ -157,6 +171,8 @@ def write_browser_clipboard(driver, text: str) -> None:
 
 
 def read_browser_clipboard(driver) -> str:
+    focus_browser_document(driver)
+
     result = driver.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -183,12 +199,16 @@ def get_kif_from_kishin(driver, url: str) -> str:
     time.sleep(3.0)
 
     grant_clipboard_permission(driver, url)
-    write_browser_clipboard(driver, "")
+    try:
+        write_browser_clipboard(driver, "")
+    except RuntimeError as e:
+        print(f"クリップボードの初期化をスキップします: {e}")
 
     print("棋譜を出力ボタンをクリックします...")
     click_export_kifu_button(driver)
 
     print("KIFコピー按钮をクリックします...")
+    focus_browser_document(driver)
     click_copy_button(driver)
 
     copied = read_browser_clipboard(driver)
