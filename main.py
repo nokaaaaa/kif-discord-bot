@@ -9,7 +9,9 @@ import discord
 import pyperclip
 from dotenv import load_dotenv
 from selenium import webdriver
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -21,6 +23,8 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 LISHOGI_USERNAME = os.getenv("LISHOGI_USERNAME")
 LISHOGI_PASSWORD = os.getenv("LISHOGI_PASSWORD")
+CHROME_BINARY = os.getenv("CHROME_BINARY")
+CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH")
 
 KISHIN_URL_RE = re.compile(
     r"https?://kishin-analytics\.heroz\.jp/[^\s<>]+"
@@ -296,12 +300,23 @@ def make_driver():
     options.add_argument("--window-size=1280,900")
     options.add_argument("--window-position=0,0")
 
-    # headless だと棋神側のクリップボードコピーが失敗しやすいので使わない
-    # options.add_argument("--headless=new")
-
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
 
-    driver = webdriver.Chrome(options=options)
+    if CHROME_BINARY:
+        options.binary_location = CHROME_BINARY
+
+    service = Service(executable_path=CHROMEDRIVER_PATH) if CHROMEDRIVER_PATH else None
+    try:
+        driver = webdriver.Chrome(service=service, options=options)
+    except WebDriverException as e:
+        raise RuntimeError(
+            "ChromeDriver の起動に失敗しました。サーバーに Google Chrome または Chromium "
+            "がインストールされているか確認してください。必要なら .env に "
+            "CHROME_BINARY と CHROMEDRIVER_PATH を設定してください。"
+        ) from e
     return driver
 
 
