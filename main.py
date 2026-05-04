@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import shutil
 import time
 import traceback
 from urllib.parse import urlparse
@@ -25,6 +26,22 @@ LISHOGI_USERNAME = os.getenv("LISHOGI_USERNAME")
 LISHOGI_PASSWORD = os.getenv("LISHOGI_PASSWORD")
 CHROME_BINARY = os.getenv("CHROME_BINARY")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH")
+
+CHROME_BINARY_CANDIDATES = (
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+)
+
+CHROME_BINARY_PATH_CANDIDATES = (
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/snap/bin/chromium",
+)
 
 KISHIN_URL_RE = re.compile(
     r"https?://kishin-analytics\.heroz\.jp/[^\s<>]+"
@@ -305,8 +322,15 @@ def make_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
 
-    if CHROME_BINARY:
-        options.binary_location = CHROME_BINARY
+    chrome_binary = find_chrome_binary()
+    if not chrome_binary:
+        raise RuntimeError(
+            "Chrome/Chromium が見つかりません。サーバーに Chromium をインストールするか、"
+            ".env に CHROME_BINARY=/path/to/chrome を設定してください。"
+        )
+
+    if chrome_binary:
+        options.binary_location = chrome_binary
 
     service = Service(executable_path=CHROMEDRIVER_PATH) if CHROMEDRIVER_PATH else None
     try:
@@ -318,6 +342,22 @@ def make_driver():
             "CHROME_BINARY と CHROMEDRIVER_PATH を設定してください。"
         ) from e
     return driver
+
+
+def find_chrome_binary() -> str | None:
+    if CHROME_BINARY:
+        return CHROME_BINARY
+
+    for command in CHROME_BINARY_CANDIDATES:
+        path = shutil.which(command)
+        if path:
+            return path
+
+    for path in CHROME_BINARY_PATH_CANDIDATES:
+        if os.path.exists(path):
+            return path
+
+    return None
 
 
 def kishin_url_to_lishogi_url(url: str) -> str:
