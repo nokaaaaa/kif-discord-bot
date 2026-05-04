@@ -9,6 +9,8 @@ import traceback
 from urllib.parse import quote, urlparse
 
 import discord
+import shogi
+import shogi.KIF
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.common.exceptions import (
@@ -56,8 +58,33 @@ CHROME_BINARY_PATH_CANDIDATES = (
 KISHIN_URL_RE = re.compile(
     r"(?:https?://)?kishin-analytics\.heroz\.jp(?:/[^\s<>]*)?(?:\?[^\s<>]*)?"
 )
+SHOGIWARS_GAME_URL_RE = re.compile(
+    r"(?:https?://)?shogiwars\.heroz\.jp/games/[A-Za-z0-9_-]+"
+)
 
 CLIPBOARD_SENTINEL = "__KISHIN_DISCORD_BOT_EMPTY_CLIPBOARD__"
+
+CSA_PIECES = ("FU", "KY", "KE", "GI", "KI", "KA", "HI", "OU", "TO", "NY", "NK", "NG", "UM", "RY")
+CSA_MOVE_RE = re.compile(
+    rf"[+-](?:00|[1-9][1-9])(?:[1-9][1-9])(?:{'|'.join(CSA_PIECES)})"
+)
+CSA_TO_USI_PIECE = {
+    "FU": "P",
+    "KY": "L",
+    "KE": "N",
+    "GI": "S",
+    "KI": "G",
+    "KA": "B",
+    "HI": "R",
+    "OU": "K",
+    "TO": "P",
+    "NY": "L",
+    "NK": "N",
+    "NG": "S",
+    "UM": "B",
+    "RY": "R",
+}
+CSA_PROMOTED = {"TO", "NY", "NK", "NG", "UM", "RY"}
 
 
 def build_shogi_extend_search_url(user_id: str) -> str:
@@ -88,6 +115,35 @@ def extract_kishin_url(text: str) -> str | None:
         url = f"https://{url}"
 
     if not is_kishin_url(url):
+        return None
+
+    return url
+
+
+def is_shogiwars_game_url(url: str) -> bool:
+    if not re.match(r"https?://", url):
+        url = f"https://{url}"
+
+    parsed = urlparse(url)
+    return (
+        parsed.scheme in ("http", "https")
+        and parsed.netloc == "shogiwars.heroz.jp"
+        and parsed.path.startswith("/games/")
+    )
+
+
+def extract_shogiwars_game_url(text: str) -> str | None:
+    match = SHOGIWARS_GAME_URL_RE.search(text)
+    if not match:
+        return None
+
+    url = match.group(0).strip()
+    url = url.rstrip(".,、。)）]］>")
+
+    if not re.match(r"https?://", url):
+        url = f"https://{url}"
+
+    if not is_shogiwars_game_url(url):
         return None
 
     return url
@@ -405,6 +461,247 @@ def get_kif_from_kishin(driver, url: str) -> str:
     return copied
 
 
+def click_shogiwars_start_position_button(driver) -> dict:
+    """
+    Shogi Wars game page の操作列から「開始局面」を押す。
+    「反転」ボタンが見える場合は、その少し左にある同じ行のボタンも候補にする。
+    """
+    result = WebDriverWait(driver, 15).until(
+        lambda d: d.execute_script(
+            """
+            const clickables = Array.from(document.querySelectorAll(
+                'button, [role="button"], a, input[type="button"], input[type="submit"], div, span'
+            ));
+
+            const items = clickables.flatMap((element, index) => {
+                const label = [
+                    element.innerText || '',
+                    element.value || '',
+                    element.getAttribute('aria-label') || '',
+                    element.getAttribute('title') || ''
+                ].join(' ').replace(/\\s+/g, ' ').trim();
+
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                const visible = rect.width > 0
+                    && rect.height > 0
+                    && style.visibility !== 'hidden'
+                    && style.display !== 'none'
+                    && Number(style.opacity || '1') > 0;
+
+                if (!visible) {
+                    return [];
+                }
+
+                return [{
+                    element,
+                    index,
+                    label,
+                    left: rect.left + window.scrollX,
+                    top: rect.top + window.scrollY,
+                    width: rect.width,
+                    height: rect.height,
+                    centerX: rect.left + rect.width / 2 + window.scrollX,
+                    centerY: rect.top + rect.height / 2 + window.scrollY
+                }];
+            });
+
+            const controls = items.filter((item) => item.width <= 240 && item.height <= 90);
+
+            const direct = controls.find((item) => item.label.includes('開始局面'));
+            if (direct) {
+                direct.element.click();
+                return { clicked: true, strategy: 'label', label: direct.label, x: direct.centerX, y: direct.centerY };
+            }
+
+            const flip = controls.find((item) => item.label.includes('反転') || /flip/i.test(item.label));
+            if (!flip) {
+                return { clicked: false, reason: 'flip button not found', labels: controls.map((item) => item.label).filter(Boolean).slice(0, 80) };
+            }
+
+            const sameRowLeft = controls
+                .filter((item) => item.centerX < flip.centerX)
+                .filter((item) => Math.abs(item.centerY - flip.centerY) <= Math.max(36, flip.height * 1.5))
+                .sort((a, b) => b.centerX - a.centerX || Math.abs(a.centerY - flip.centerY) - Math.abs(b.centerY - flip.centerY));
+
+            const target = sameRowLeft[0];
+            if (!target) {
+                return { clicked: false, reason: 'left-side start button not found', flip: { label: flip.label, x: flip.centerX, y: flip.centerY } };
+            }
+
+            target.element.click();
+            return {
+                clicked: true,
+                strategy: 'left-of-flip',
+                label: target.label,
+                x: target.centerX,
+                y: target.centerY,
+                flip: { label: flip.label, x: flip.centerX, y: flip.centerY }
+            };
+            """
+        )
+    )
+
+    if not result.get("clicked"):
+        raise RuntimeError(f"Shogi Warsの開始局面ボタンを押せませんでした: {result}")
+
+    print("Shogi Wars開始局面ボタン:", result)
+    return result
+
+
+def csa_square_to_usi(square: str) -> str:
+    file_no = int(square[0])
+    rank_no = int(square[1])
+    return f"{file_no}{chr(ord('a') + rank_no - 1)}"
+
+
+def csa_square_to_shogi_index(square: str) -> int:
+    file_no = int(square[0])
+    rank_no = int(square[1])
+    return (rank_no - 1) * 9 + (9 - file_no)
+
+
+def csa_moves_to_usi_moves(csa_moves: list[str]) -> list[str]:
+    board = shogi.Board()
+    usi_moves = []
+
+    for csa_move in csa_moves:
+        color = csa_move[0]
+        from_sq = csa_move[1:3]
+        to_sq = csa_move[3:5]
+        piece = csa_move[5:7]
+
+        expected_color = "+" if board.turn == shogi.BLACK else "-"
+        if color != expected_color:
+            raise RuntimeError(f"CSAの手番が局面と合いません: {csa_move}")
+
+        if from_sq == "00":
+            usi_move = f"{CSA_TO_USI_PIECE[piece]}*{csa_square_to_usi(to_sq)}"
+        else:
+            source_piece = board.piece_at(csa_square_to_shogi_index(from_sq))
+            if source_piece is None:
+                raise RuntimeError(f"移動元に駒がありません: {csa_move}")
+
+            promotes = piece in CSA_PROMOTED and not source_piece.is_promoted()
+            usi_move = f"{csa_square_to_usi(from_sq)}{csa_square_to_usi(to_sq)}"
+            if promotes:
+                usi_move += "+"
+
+        board.push_usi(usi_move)
+        usi_moves.append(usi_move)
+
+    return usi_moves
+
+
+def shogiwars_players_from_url(url: str) -> tuple[str, str]:
+    game_id = urlparse(url).path.rstrip("/").split("/")[-1]
+    match = re.match(r"(.+)-(.+)-\d{8}_\d{6}$", game_id)
+    if not match:
+        return ("先手", "後手")
+    return match.group(1), match.group(2)
+
+
+def usi_moves_to_kif(usi_moves: list[str], black_name: str, white_name: str) -> str:
+    if not usi_moves:
+        raise RuntimeError("Shogi Warsから手順を取得できませんでした。")
+
+    winner = "b" if len(usi_moves) % 2 == 1 else "w"
+    return shogi.KIF.Exporter.kif(
+        {
+            "names": [black_name, white_name],
+            "sfen": shogi.STARTING_SFEN,
+            "moves": usi_moves,
+            "win": winner,
+        }
+    )
+
+
+def extract_csa_moves_from_shogiwars_page(driver) -> list[str]:
+    texts = driver.execute_script(
+        """
+        const scripts = Array.from(document.scripts).map((script) => script.textContent || '').join('\\n');
+        return [
+            document.documentElement.outerHTML || '',
+            document.body && document.body.innerText || '',
+            scripts
+        ];
+        """
+    )
+
+    best: list[str] = []
+    for text in texts:
+        moves = CSA_MOVE_RE.findall(text or "")
+        if len(moves) > len(best):
+            best = moves
+
+    return best
+
+
+def extract_kif_block_from_shogiwars_page(driver) -> str | None:
+    body_text = driver.execute_script("return document.body && document.body.innerText || ''")
+    if not body_text:
+        return None
+
+    lines = [line.strip() for line in body_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    start = None
+    for index, line in enumerate(lines):
+        if "手数----指手" in line:
+            start = index
+            break
+
+    if start is None:
+        return None
+
+    header = [
+        "開始日時：",
+        "終了日時：",
+        "手合割：平手",
+        "先手：先手",
+        "後手：後手",
+    ]
+    move_lines = [line for line in lines[start:] if line]
+    candidate = "\n".join(header + move_lines)
+    return candidate if is_kif_text(candidate) else None
+
+
+def get_kif_from_shogiwars(driver, url: str) -> str:
+    """
+    Shogi Warsの対局URLを開き、開始局面ボタンから出る手順をKIFにする。
+    """
+    print("Shogi Warsの対局ページを開いています...")
+    driver.get(url)
+
+    wait = WebDriverWait(driver, 20)
+    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    time.sleep(2.0)
+
+    click_shogiwars_start_position_button(driver)
+    time.sleep(1.0)
+
+    csa_moves = extract_csa_moves_from_shogiwars_page(driver)
+    if csa_moves:
+        print(f"Shogi WarsからCSA形式の手順を検出しました: {len(csa_moves)}手")
+        usi_moves = csa_moves_to_usi_moves(csa_moves)
+        black_name, white_name = shogiwars_players_from_url(url)
+        return usi_moves_to_kif(usi_moves, black_name, white_name)
+
+    kif_text = extract_kif_block_from_shogiwars_page(driver)
+    if kif_text:
+        print("Shogi WarsページからKIF風テキストを検出しました。")
+        return kif_text
+
+    debug = driver.execute_script(
+        """
+        return {
+            url: location.href,
+            title: document.title,
+            bodyText: (document.body && document.body.innerText || '').slice(0, 1000)
+        };
+        """
+    )
+    raise RuntimeError(f"Shogi Warsページから手順を取得できませんでした: {debug}")
+
+
 def find_visible(driver, by: By, selector: str):
     elements = driver.find_elements(by, selector)
     for element in elements:
@@ -667,6 +964,24 @@ def shogi_extend_to_lishogi_url(user_id: str) -> str:
             shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
+def shogiwars_url_to_lishogi_url(url: str) -> str:
+    """
+    Shogi Wars URL → KIF生成 → lishogiインポート → lishogi URL返却
+    """
+    driver = make_driver()
+
+    try:
+        kif_text = get_kif_from_shogiwars(driver, url)
+        lishogi_url = import_kif_to_lishogi(driver, kif_text)
+        return lishogi_url
+
+    finally:
+        user_data_dir = getattr(driver, "_kishin_user_data_dir", None)
+        driver.quit()
+        if user_data_dir:
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -775,16 +1090,45 @@ async def poll_shogi_extend() -> None:
 
 @client.event
 async def on_ready():
-    global polling_task
-
     print(f"ログインしました: {client.user}")
-    if polling_task is None or polling_task.done():
-        polling_task = asyncio.create_task(poll_shogi_extend())
 
 
 @client.event
 async def on_message(message: discord.Message):
-    return
+    if message.author.bot:
+        return
+
+    if CHANNEL_ID and message.channel.id != int(CHANNEL_ID):
+        return
+
+    shogiwars_url = extract_shogiwars_game_url(message.content)
+    if shogiwars_url:
+        async with selenium_lock:
+            try:
+                await message.channel.send("Shogi Warsの棋譜をlishogiに読み込んでいます...")
+                lishogi_url = await asyncio.to_thread(
+                    shogiwars_url_to_lishogi_url,
+                    shogiwars_url,
+                )
+                await message.reply(f"lishogiに読み込みました。\n{lishogi_url}", mention_author=False)
+            except Exception as e:
+                traceback.print_exc()
+                await message.reply(f"Shogi Warsの棋譜変換に失敗しました: {e}", mention_author=False)
+        return
+
+    kishin_url = extract_kishin_url(message.content)
+    if kishin_url:
+        async with selenium_lock:
+            try:
+                await message.channel.send("棋神アナリティクスの棋譜をlishogiに読み込んでいます...")
+                lishogi_url = await asyncio.to_thread(
+                    kishin_url_to_lishogi_url,
+                    kishin_url,
+                )
+                await message.reply(f"lishogiに読み込みました。\n{lishogi_url}", mention_author=False)
+            except Exception as e:
+                traceback.print_exc()
+                await message.reply(f"棋神アナリティクスの棋譜変換に失敗しました: {e}", mention_author=False)
 
 
 def main():
@@ -798,10 +1142,6 @@ def main():
         raise RuntimeError(".env の CHANNEL_ID は数字で設定してください。") from e
     if not LISHOGI_USERNAME or not LISHOGI_PASSWORD:
         raise RuntimeError(".env に LISHOGI_USERNAME と LISHOGI_PASSWORD を設定してください。")
-    if not USER_ID:
-        raise RuntimeError(".env に USER_ID を設定してください。")
-    if POLL_INTERVAL_SECONDS < 3:
-        raise RuntimeError("POLL_INTERVAL_SECONDS は3以上にしてください。")
 
     client.run(DISCORD_TOKEN)
 
