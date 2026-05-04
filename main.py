@@ -1145,11 +1145,26 @@ def import_kif_to_lishogi(driver, kif_text: str) -> str:
 
     print("lishogiのURL生成を待っています...")
 
-    wait.until(lambda d: d.current_url != before_url)
+    try:
+        wait.until(
+            lambda d: urlparse(d.current_url).path.rstrip("/")
+            not in ("", "/paste", "/import", "/login")
+        )
+    except TimeoutException as e:
+        body_preview = ""
+        try:
+            body_preview = driver.find_element(By.TAG_NAME, "body").text[:500]
+        except WebDriverException:
+            pass
+        raise RuntimeError(
+            "lishogiへのインポート後、共有URLに遷移しませんでした。"
+            f"現在のURL: {driver.current_url}"
+            + (f" / ページ内容: {body_preview}" if body_preview else "")
+        ) from e
 
     lishogi_url = driver.current_url
 
-    if "lishogi.org/paste" in lishogi_url:
+    if "lishogi.org/paste" in lishogi_url or "lishogi.org/import" in lishogi_url:
         raise RuntimeError("lishogiへのインポート後URLに遷移しませんでした。")
 
     print("lishogi URL:", lishogi_url)
