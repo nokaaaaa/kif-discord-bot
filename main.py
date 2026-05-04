@@ -11,7 +11,11 @@ from urllib.parse import quote, urlparse
 import discord
 from dotenv import load_dotenv
 from selenium import webdriver
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    TimeoutException,
+    WebDriverException,
+)
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
@@ -374,8 +378,11 @@ def get_kif_from_kishin(driver, url: str) -> str:
 def find_visible(driver, by: By, selector: str):
     elements = driver.find_elements(by, selector)
     for element in elements:
-        if element.is_displayed() and element.is_enabled():
-            return element
+        try:
+            if element.is_displayed() and element.is_enabled():
+                return element
+        except StaleElementReferenceException:
+            continue
     return None
 
 
@@ -397,7 +404,11 @@ def login_to_lishogi(driver) -> None:
     print("lishogi login page を開いています...")
     driver.get("https://lishogi.org/login")
 
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(
+        driver,
+        20,
+        ignored_exceptions=(StaleElementReferenceException,),
+    )
 
     if "/login" not in urlparse(driver.current_url).path:
         print("lishogi はすでにログイン済みです。")
