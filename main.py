@@ -12,6 +12,7 @@ import urllib.request
 from urllib.parse import quote, urlparse
 
 import discord
+import shogi
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.common.exceptions import (
@@ -1352,18 +1353,14 @@ def kif_text_to_lishogi_url(kif_text: str) -> str:
     return import_kif_to_lishogi(get_poll_driver(), kif_text)
 
 
-def is_allowed_message_channel(message: discord.Message) -> bool:
-    if message.guild is None:
-        return True
-
-    return bool(CHANNEL_ID) and message.channel.id == int(CHANNEL_ID)
-
-
 async def poll_shogi_extend() -> None:
     global last_kif_hash
 
     await client.wait_until_ready()
     last_kif_hash = load_last_kif_hash()
+
+    if not CHANNEL_ID:
+        raise RuntimeError("poll_shogi_extend requires CHANNEL_ID for the notification channel.")
 
     channel = client.get_channel(int(CHANNEL_ID))
     if channel is None:
@@ -1409,9 +1406,6 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    if not is_allowed_message_channel(message):
-        return
-
     shogiwars_url = extract_shogiwars_game_url(message.content)
     if shogiwars_url:
         async with selenium_lock:
@@ -1445,12 +1439,11 @@ async def on_message(message: discord.Message):
 def main():
     if not DISCORD_TOKEN:
         raise RuntimeError(".env に DISCORD_TOKEN が設定されていません。")
-    if not CHANNEL_ID:
-        raise RuntimeError(".env に CHANNEL_ID を設定してください。")
-    try:
-        int(CHANNEL_ID)
-    except ValueError as e:
-        raise RuntimeError(".env の CHANNEL_ID は数字で設定してください。") from e
+    if CHANNEL_ID:
+        try:
+            int(CHANNEL_ID)
+        except ValueError as e:
+            raise RuntimeError(".env の CHANNEL_ID は数字で設定してください。") from e
     if not LISHOGI_USERNAME or not LISHOGI_PASSWORD:
         raise RuntimeError(".env に LISHOGI_USERNAME と LISHOGI_PASSWORD を設定してください。")
 
