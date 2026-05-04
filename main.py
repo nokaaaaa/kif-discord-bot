@@ -1,16 +1,17 @@
 import asyncio
+import html
 import hashlib
+import json
 import os
 import re
 import shutil
 import tempfile
 import time
 import traceback
+import urllib.request
 from urllib.parse import quote, urlparse
 
 import discord
-import shogi
-import shogi.KIF
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.common.exceptions import (
@@ -64,27 +65,31 @@ SHOGIWARS_GAME_URL_RE = re.compile(
 
 CLIPBOARD_SENTINEL = "__KISHIN_DISCORD_BOT_EMPTY_CLIPBOARD__"
 
-CSA_PIECES = ("FU", "KY", "KE", "GI", "KI", "KA", "HI", "OU", "TO", "NY", "NK", "NG", "UM", "RY")
-CSA_MOVE_RE = re.compile(
-    rf"[+-](?:00|[1-9][1-9])(?:[1-9][1-9])(?:{'|'.join(CSA_PIECES)})"
-)
-CSA_TO_USI_PIECE = {
-    "FU": "P",
-    "KY": "L",
-    "KE": "N",
-    "GI": "S",
-    "KI": "G",
-    "KA": "B",
-    "HI": "R",
-    "OU": "K",
-    "TO": "P",
-    "NY": "L",
-    "NK": "N",
-    "NG": "S",
-    "UM": "B",
-    "RY": "R",
+SHOGIWARS_NORMAL_PIECES = {
+    "FU": "歩",
+    "KY": "香",
+    "KE": "桂",
+    "GI": "銀",
+    "KI": "金",
+    "KA": "角",
+    "HI": "飛",
+    "OU": "玉",
+    "TO": "歩成",
+    "NY": "香成",
+    "NK": "桂成",
+    "NG": "銀成",
+    "UM": "角成",
+    "RY": "飛成",
 }
-CSA_PROMOTED = {"TO", "NY", "NK", "NG", "UM", "RY"}
+SHOGIWARS_PROMOTED_PIECES = {
+    "TO": "と",
+    "NY": "成香",
+    "NK": "成桂",
+    "NG": "成銀",
+    "UM": "馬",
+    "RY": "龍",
+}
+SHOGIWARS_PROMOTED_CODES = set(SHOGIWARS_PROMOTED_PIECES)
 
 
 def build_shogi_extend_search_url(user_id: str) -> str:
@@ -700,6 +705,292 @@ def get_kif_from_shogiwars(driver, url: str) -> str:
         """
     )
     raise RuntimeError(f"Shogi Warsページから手順を取得できませんでした: {debug}")
+
+
+def fetch_shogiwars_source(url: str) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            )
+        },
+    )
+
+    with urllib.request.urlopen(request, timeout=20) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, errors="replace")
+
+
+def extract_shogiwars_game_hash(source: str) -> str:
+    decoded = html.unescape(source).replace(r"\/", "/").replace(r"\"", '"')
+    patterns = (
+        r'"gameHash"\s*:\s*"([^"]+)"',
+        r"gameHash\s*[:=]\s*'([^']+)'",
+        r'gameHash\s*[:=]\s*"([^"]+)"',
+    )
+
+    for pattern in patterns:
+        match = re.search(pattern, decoded)
+        if match:
+            return match.group(1)
+
+    marker = decoded.find("gameHash")
+    if marker < 0:
+        raise RuntimeError("Shogi WarsのページからgameHashが見つかりませんでした。")
+
+    fragment_end = decoded.find("userConfig", marker)
+    fragment = decoded[marker:fragment_end if fragment_end >= 0 else marker + 5000]
+    match = re.search(r"\d{8}_\d{6}[^\"'<]+", fragment)
+    if not match:
+        raise RuntimeError("Shogi WarsのgameHash本文を取り出せませんでした。")
+
+    return match.group(0).rstrip(",}] ")
+
+
+def extract_shogiwars_game_json(source: str) -> dict | None:
+    match = re.search(r'data-react-props="([^"]+)"', source)
+    if not match:
+        return None
+
+    try:
+        props = json.loads(html.unescape(match.group(1)))
+    except json.JSONDecodeError:
+        return None
+
+    game_hash = props.get("gameHash")
+    return game_hash if isinstance(game_hash, dict) else None
+
+
+def shogiwars_payload_from_game_hash(game_hash: str) -> str:
+    parts = game_hash.split("-", 2)
+    if len(parts) == 3 and re.match(r"\d{8}_\d{6}", parts[2]):
+        return parts[2]
+    return game_hash
+
+
+def parse_shogiwars_fields(metadata: list[str]) -> dict[str, str]:
+    fields = {}
+    for item in metadata:
+        key, separator, value = item.partition(":")
+        if separator:
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def shogiwars_piece_name(piece_code: str, already_promoted: bool) -> str:
+    if already_promoted:
+        return SHOGIWARS_PROMOTED_PIECES.get(piece_code, SHOGIWARS_NORMAL_PIECES[piece_code])
+    return SHOGIWARS_NORMAL_PIECES[piece_code]
+
+
+def shogiwars_game_type_name(game_type: str) -> str:
+    if game_type == "sb":
+        return "3分"
+    if game_type == "s1":
+        return "10秒"
+    return "10分"
+
+
+def shogiwars_time_control(game_type: str) -> str:
+    if game_type == "sb":
+        return "3分切れ負け"
+    if game_type == "s1":
+        return "10秒将棋"
+    return "10分切れ負け"
+
+
+def iter_shogiwars_move_fields(moves_text: str):
+    moves_text = moves_text.strip()
+    moves_text = moves_text.removeprefix("[")
+    moves_text = moves_text.removeprefix("{")
+    moves_text = moves_text.removesuffix("]")
+    moves_text = moves_text.removesuffix("}")
+
+    for index, move_info in enumerate(moves_text.split("},{")):
+        parts = parse_shogiwars_fields(move_info.strip("{}[]").split(","))
+        if "m" not in parts:
+            continue
+        yield index, parts
+
+
+def shogiwars_result_lines(result_value: str, move_count: int) -> tuple[str, str]:
+    result_parts = result_value.split("_")
+    result_method = result_parts[-1] if result_parts else ""
+
+    if result_method == "SENNICHI":
+        return "千日手", f"まで{move_count}手で千日手"
+    if result_method == "TIMEOUT":
+        method = "時間切れ"
+        suffix = "時間切れにより"
+    else:
+        method = "投了"
+        suffix = ""
+
+    winner = "先手" if result_parts and result_parts[0] == "SENTE" else "後手"
+    return method, f"まで{move_count}手で{suffix}{winner}の勝ち"
+
+
+def shogiwars_payload_to_kif(payload: str) -> str:
+    timestamp, separator, rest = payload.partition(",")
+    if not separator or not re.match(r"\d{8}_\d{6}$", timestamp):
+        raise RuntimeError("Shogi WarsのgameHash形式が想定外です。")
+
+    date = timestamp[:8]
+    clock = timestamp[9:]
+    metadata = rest.split(",", 11)
+    if len(metadata) < 12:
+        raise RuntimeError("Shogi Warsの棋譜メタデータが不足しています。")
+
+    moves_field = metadata[-1]
+    fields = parse_shogiwars_fields(metadata[:-1])
+    moves_text = moves_field.partition(":")[2]
+    if not moves_text:
+        raise RuntimeError("Shogi Warsの指し手データが空です。")
+
+    game_type = fields.get("gtype", "")
+    sente = fields.get("sente", "先手")
+    gote = fields.get("gote", "後手")
+    sente_dan = fields.get("sente_dan", "")
+    gote_dan = fields.get("gote_dan", "")
+
+    date_print = f"{date[:4]}/{date[4:6]}/{date[6:8]} {clock[:2]}:{clock[2:4]}:{clock[4:6]}"
+    lines = [
+        f"開始日時：{date_print}",
+        f"棋戦：将棋ウォーズ({shogiwars_game_type_name(game_type)})",
+    ]
+    if game_type != "s1":
+        lines.append(f"持ち時間：{shogiwars_time_control(game_type)}")
+    lines.extend(
+        [
+            "手合割：平手",
+            f"先手：{sente} {sente_dan}".rstrip(),
+            f"後手：{gote} {gote_dan}".rstrip(),
+            "手数----指手---------消費時間--",
+        ]
+    )
+
+    promoted_map = [[False for _ in range(10)] for _ in range(10)]
+    move_count = 0
+
+    for fallback_index, move_fields in iter_shogiwars_move_fields(moves_text):
+        move = move_fields["m"]
+        if len(move) < 6:
+            continue
+
+        move_count = int(move_fields.get("n", fallback_index)) + 1
+        origin = move[0:2]
+        dest = move[2:4]
+        piece_code = move[4:6]
+        already_promoted = origin != "00" and promoted_map[int(origin[0])][int(origin[1])]
+        piece = shogiwars_piece_name(piece_code, already_promoted)
+
+        if origin != "00":
+            promoted_map[int(origin[0])][int(origin[1])] = False
+        promoted_map[int(dest[0])][int(dest[1])] = (
+            already_promoted or piece_code in SHOGIWARS_PROMOTED_CODES
+        )
+
+        origin_text = "打" if origin == "00" else f"({origin})"
+        lines.append(f"{move_count:3d} {dest}{piece}{origin_text}")
+
+    if move_count == 0:
+        raise RuntimeError("Shogi Warsの指し手をKIFへ変換できませんでした。")
+
+    method, result_line = shogiwars_result_lines(fields.get("result", ""), move_count)
+    lines.append(f"{move_count + 1:3d} {method}")
+    lines.append(result_line)
+    return "\n".join(lines) + "\n"
+
+
+def shogiwars_json_to_kif(game: dict) -> str:
+    name = str(game.get("name", ""))
+    name_parts = name.split("-", 2)
+    if len(name_parts) != 3 or not re.match(r"\d{8}_\d{6}$", name_parts[2]):
+        raise RuntimeError("Shogi Warsの対局名から開始日時を取り出せませんでした。")
+
+    timestamp = name_parts[2]
+    date = timestamp[:8]
+    clock = timestamp[9:]
+    game_type = str(game.get("gtype", ""))
+    moves = game.get("moves")
+    if not isinstance(moves, list):
+        raise RuntimeError("Shogi Warsの指し手データが見つかりませんでした。")
+
+    date_print = f"{date[:4]}/{date[4:6]}/{date[6:8]} {clock[:2]}:{clock[2:4]}:{clock[4:6]}"
+    lines = [
+        f"開始日時：{date_print}",
+        f"棋戦：将棋ウォーズ({shogiwars_game_type_name(game_type)})",
+    ]
+    if game_type != "s1":
+        lines.append(f"持ち時間：{shogiwars_time_control(game_type)}")
+    lines.extend(
+        [
+            "手合割：平手",
+            f"先手：{game.get('sente', '先手')}",
+            f"後手：{game.get('gote', '後手')}",
+            "手数----指手---------消費時間--",
+        ]
+    )
+
+    promoted_map = [[False for _ in range(10)] for _ in range(10)]
+    move_count = 0
+
+    for fallback_index, move_fields in enumerate(moves):
+        if not isinstance(move_fields, dict):
+            continue
+
+        move = str(move_fields.get("m", ""))
+        if move.startswith(("+", "-")):
+            move = move[1:]
+        if len(move) < 6:
+            continue
+
+        move_count = int(move_fields.get("n", fallback_index)) + 1
+        origin = move[0:2]
+        dest = move[2:4]
+        piece_code = move[4:6]
+        already_promoted = origin != "00" and promoted_map[int(origin[0])][int(origin[1])]
+        piece = shogiwars_piece_name(piece_code, already_promoted)
+
+        if origin != "00":
+            promoted_map[int(origin[0])][int(origin[1])] = False
+        promoted_map[int(dest[0])][int(dest[1])] = (
+            already_promoted or piece_code in SHOGIWARS_PROMOTED_CODES
+        )
+
+        origin_text = "打" if origin == "00" else f"({origin})"
+        lines.append(f"{move_count:3d} {dest}{piece}{origin_text}")
+
+    if move_count == 0:
+        raise RuntimeError("Shogi Warsの指し手をKIFへ変換できませんでした。")
+
+    method, result_line = shogiwars_result_lines(str(game.get("result", "")), move_count)
+    lines.append(f"{move_count + 1:3d} {method}")
+    lines.append(result_line)
+    return "\n".join(lines) + "\n"
+
+
+def get_kif_from_shogiwars(driver, url: str) -> str:
+    """
+    Shogi WarsのgameHashをconvert.pyと同じ発想で解析し、KIFを生成する。
+    driverは呼び出し形を揃えるために受け取るだけで、変換には使わない。
+    """
+    print("Shogi Warsの棋譜データを取得しています...")
+    source = fetch_shogiwars_source(url)
+    game = extract_shogiwars_game_json(source)
+    if game is not None:
+        kif_text = shogiwars_json_to_kif(game)
+        print("Shogi Warsの棋譜をKIFへ変換しました。")
+        return kif_text
+
+    game_hash = extract_shogiwars_game_hash(source)
+    payload = shogiwars_payload_from_game_hash(game_hash)
+    kif_text = shogiwars_payload_to_kif(payload)
+    print("Shogi Warsの棋譜をKIFへ変換しました。")
+    return kif_text
 
 
 def find_visible(driver, by: By, selector: str):
