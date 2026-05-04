@@ -1,6 +1,6 @@
 # Kishin Discord Bot
 
-Discord に投稿された Kishin Analytics の URL から棋譜を取り出し、lishogi に読み込ませる bot です。
+Discord に `go` と投稿すると、Shogi Wars の履歴ページから一番上にある Kishin Analytics ボタンを探し、棋譜を取り出して lishogi に読み込ませる bot です。
 
 ## Server Requirements
 
@@ -29,6 +29,7 @@ The bot also requires:
 
 ```env
 DISCORD_TOKEN=...
+USER_ID=...
 LISHOGI_USERNAME=...
 LISHOGI_PASSWORD=...
 ```

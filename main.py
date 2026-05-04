@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import time
 import traceback
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import discord
 from dotenv import load_dotenv
@@ -24,6 +24,7 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 LISHOGI_USERNAME = os.getenv("LISHOGI_USERNAME")
 LISHOGI_PASSWORD = os.getenv("LISHOGI_PASSWORD")
+USER_ID = os.getenv("USER_ID")
 CHROME_BINARY = os.getenv("CHROME_BINARY")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH")
 
@@ -48,6 +49,14 @@ KISHIN_URL_RE = re.compile(
 )
 
 CLIPBOARD_SENTINEL = "__KISHIN_DISCORD_BOT_EMPTY_CLIPBOARD__"
+
+
+def build_shogiwars_history_url(user_id: str) -> str:
+    encoded_user_id = quote(user_id, safe="")
+    return (
+        "https://shogiwars.heroz.jp/games/history"
+        f"?gtype=&init_pos_type=normal&locale=ja&user_id={encoded_user_id}"
+    )
 
 
 def is_kishin_url(url: str) -> bool:
@@ -76,6 +85,77 @@ def extract_kishin_url(text: str) -> str | None:
         return None
 
     return url
+
+
+def find_topmost_kishin_url_on_history(driver, history_url: str) -> str:
+    """
+    Shogi Wars の履歴ページから、画面上の y 座標が一番小さい Kishin ボタンのURLを返す。
+    """
+    print("Shogi Wars の履歴ページを開いています...")
+    driver.get(history_url)
+
+    wait = WebDriverWait(driver, 20)
+    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+    candidates = wait.until(
+        lambda d: d.execute_script(
+            """
+            const re = /(?:https?:\\/\\/)?kishin-analytics\\.heroz\\.jp(?:\\/[^\\s"'<>]*)?(?:\\?[^\\s"'<>]*)?/;
+            const elements = Array.from(document.querySelectorAll(
+                'a[href*="kishin-analytics.heroz.jp"], button, [role="button"], [onclick]'
+            ));
+
+            return elements.flatMap((element, index) => {
+                const href = element.getAttribute('href') || '';
+                const onclick = element.getAttribute('onclick') || '';
+                const html = element.outerHTML || '';
+                const source = `${href} ${onclick} ${html}`;
+                const match = source.match(re);
+
+                if (!match) {
+                    return [];
+                }
+
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                const visible = rect.width > 0
+                    && rect.height > 0
+                    && style.visibility !== 'hidden'
+                    && style.display !== 'none';
+
+                if (!visible) {
+                    return [];
+                }
+
+                return [{
+                    url: match[0],
+                    x: rect.left + window.scrollX,
+                    y: rect.top + window.scrollY,
+                    index,
+                    text: element.innerText || element.getAttribute('aria-label') || ''
+                }];
+            });
+            """
+        )
+    )
+
+    candidates = [
+        {
+            **candidate,
+            "url": extract_kishin_url(candidate["url"]),
+        }
+        for candidate in candidates
+    ]
+    candidates = [candidate for candidate in candidates if candidate["url"]]
+
+    if not candidates:
+        raise RuntimeError(
+            "Shogi Wars の履歴ページで Kishin Analytics に飛べるボタンが見つかりませんでした。"
+        )
+
+    target = min(candidates, key=lambda candidate: (candidate["y"], candidate["x"], candidate["index"]))
+    print("選択した Kishin ボタン:", target)
+    return target["url"]
 
 
 def click_export_kifu_button(driver):
@@ -497,6 +577,26 @@ def kishin_url_to_lishogi_url(url: str) -> str:
             shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
+def shogiwars_history_to_lishogi_url(user_id: str) -> str:
+    """
+    Shogi Wars 履歴 → 一番上の棋神URL → KIF取得 → lishogiインポート → lishogi URL返却
+    """
+    driver = make_driver()
+
+    try:
+        history_url = build_shogiwars_history_url(user_id)
+        kishin_url = find_topmost_kishin_url_on_history(driver, history_url)
+        kif_text = get_kif_from_kishin(driver, kishin_url)
+        lishogi_url = import_kif_to_lishogi(driver, kif_text)
+        return lishogi_url
+
+    finally:
+        user_data_dir = getattr(driver, "_kishin_user_data_dir", None)
+        driver.quit()
+        if user_data_dir:
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -515,15 +615,14 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    url = extract_kishin_url(message.content)
-    if not url:
+    if message.content.strip().lower() != "go":
         return
 
     async with selenium_lock:
-        await message.channel.send("棋譜を取得して、lishogiに読み込ませています...")
+        await message.channel.send("Shogi Warsの履歴から棋神ボタンを探して、lishogiに読み込ませています...")
 
         try:
-            lishogi_url = await asyncio.to_thread(kishin_url_to_lishogi_url, url)
+            lishogi_url = await asyncio.to_thread(shogiwars_history_to_lishogi_url, USER_ID)
 
             await message.reply(
                 content=f"lishogiに読み込みました。\n{lishogi_url}",
@@ -544,6 +643,8 @@ def main():
         raise RuntimeError(".env に DISCORD_TOKEN が設定されていません。")
     if not LISHOGI_USERNAME or not LISHOGI_PASSWORD:
         raise RuntimeError(".env に LISHOGI_USERNAME と LISHOGI_PASSWORD を設定してください。")
+    if not USER_ID:
+        raise RuntimeError(".env に USER_ID を設定してください。")
 
     client.run(DISCORD_TOKEN)
 
