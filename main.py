@@ -35,6 +35,7 @@ CHROME_BINARY = os.getenv("CHROME_BINARY")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
 LAST_KIF_HASH_PATH = os.getenv("LAST_KIF_HASH_PATH", ".last_kif_hash")
+CLIPBOARD_WAIT_SECONDS = float(os.getenv("CLIPBOARD_WAIT_SECONDS", "5"))
 
 CHROME_BINARY_CANDIDATES = (
     "google-chrome",
@@ -152,10 +153,10 @@ def get_kif_from_shogi_extend(driver, user_id: str) -> str:
 
     try:
         write_browser_clipboard(driver, CLIPBOARD_SENTINEL)
+        clipboard_before = CLIPBOARD_SENTINEL
     except RuntimeError as e:
+        clipboard_before = read_browser_clipboard(driver)
         print(f"クリップボードの初期化をスキップします: {e}")
-
-    time.sleep(2.0)
 
     try:
         target = wait.until(find_topmost_copy_button)
@@ -178,9 +179,8 @@ def get_kif_from_shogi_extend(driver, user_id: str) -> str:
 
     print("押すshogi-extendコピーボタン:", {key: target[key] for key in ("x", "y", "index", "label")})
     ActionChains(driver).move_to_element(target["element"]).click().perform()
-    time.sleep(1.0)
 
-    copied = read_browser_clipboard(driver)
+    copied = wait_for_clipboard_change(driver, clipboard_before)
     print("クリップボード文字数:", len(copied))
 
     if not copied.strip():
@@ -209,7 +209,6 @@ def click_export_kifu_button(driver):
     print(f"棋譜を出力ボタンをCSSで発見: {selector}")
 
     ActionChains(driver).move_to_element(el).click().perform()
-    time.sleep(1.0)
 
 
 def click_copy_button(driver):
@@ -249,7 +248,6 @@ def click_copy_button(driver):
     print(rect)
 
     ActionChains(driver).move_to_element(target).click().perform()
-    time.sleep(1.0)
 
 
 def grant_clipboard_permission(driver, url: str) -> None:
@@ -316,6 +314,19 @@ def read_browser_clipboard(driver) -> str:
     return result.get("text", "")
 
 
+def wait_for_clipboard_change(driver, previous_text: str) -> str:
+    deadline = time.monotonic() + CLIPBOARD_WAIT_SECONDS
+    last_text = previous_text
+
+    while time.monotonic() < deadline:
+        last_text = read_browser_clipboard(driver)
+        if last_text.strip() and last_text != previous_text:
+            return last_text
+        time.sleep(0.1)
+
+    return last_text
+
+
 def is_kif_text(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
@@ -348,7 +359,9 @@ def get_kif_from_kishin(driver, url: str) -> str:
     grant_clipboard_permission(driver, url)
     try:
         write_browser_clipboard(driver, CLIPBOARD_SENTINEL)
+        clipboard_before = CLIPBOARD_SENTINEL
     except RuntimeError as e:
+        clipboard_before = read_browser_clipboard(driver)
         print(f"クリップボードの初期化をスキップします: {e}")
 
     print("棋譜を出力ボタンをクリックします...")
@@ -358,7 +371,7 @@ def get_kif_from_kishin(driver, url: str) -> str:
     focus_browser_document(driver)
     click_copy_button(driver)
 
-    copied = read_browser_clipboard(driver)
+    copied = wait_for_clipboard_change(driver, clipboard_before)
 
     print("クリップボード文字数:", len(copied))
 
@@ -497,7 +510,6 @@ def import_kif_to_lishogi(driver, kif_text: str) -> str:
         kif_text,
     )
 
-    time.sleep(0.5)
 
     print("Import game ボタンをクリックします...")
 
@@ -529,8 +541,6 @@ def import_kif_to_lishogi(driver, kif_text: str) -> str:
     print("lishogiのURL生成を待っています...")
 
     wait.until(lambda d: d.current_url != before_url)
-
-    time.sleep(1.0)
 
     lishogi_url = driver.current_url
 
@@ -648,6 +658,7 @@ client = discord.Client(intents=intents)
 selenium_lock = asyncio.Lock()
 polling_task: asyncio.Task | None = None
 last_kif_hash: str | None = None
+poll_driver = None
 
 
 def kif_hash(kif_text: str) -> str:
@@ -669,30 +680,40 @@ def save_last_kif_hash(value: str) -> None:
         f.write(f"{value}\n")
 
 
-def shogi_extend_latest_kif(user_id: str) -> str:
-    driver = make_driver()
-
+def close_driver(driver) -> None:
+    user_data_dir = getattr(driver, "_kishin_user_data_dir", None)
     try:
-        return get_kif_from_shogi_extend(driver, user_id)
-
-    finally:
-        user_data_dir = getattr(driver, "_kishin_user_data_dir", None)
         driver.quit()
+    finally:
         if user_data_dir:
             shutil.rmtree(user_data_dir, ignore_errors=True)
+
+
+def reset_poll_driver() -> None:
+    global poll_driver
+
+    if poll_driver is not None:
+        try:
+            close_driver(poll_driver)
+        finally:
+            poll_driver = None
+
+
+def get_poll_driver():
+    global poll_driver
+
+    if poll_driver is None:
+        poll_driver = make_driver()
+
+    return poll_driver
+
+
+def shogi_extend_latest_kif(user_id: str) -> str:
+    return get_kif_from_shogi_extend(get_poll_driver(), user_id)
 
 
 def kif_text_to_lishogi_url(kif_text: str) -> str:
-    driver = make_driver()
-
-    try:
-        return import_kif_to_lishogi(driver, kif_text)
-
-    finally:
-        user_data_dir = getattr(driver, "_kishin_user_data_dir", None)
-        driver.quit()
-        if user_data_dir:
-            shutil.rmtree(user_data_dir, ignore_errors=True)
+    return import_kif_to_lishogi(get_poll_driver(), kif_text)
 
 
 async def poll_shogi_extend() -> None:
@@ -730,6 +751,7 @@ async def poll_shogi_extend() -> None:
 
         except Exception:
             traceback.print_exc()
+            await asyncio.to_thread(reset_poll_driver)
 
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
@@ -761,8 +783,8 @@ def main():
         raise RuntimeError(".env に LISHOGI_USERNAME と LISHOGI_PASSWORD を設定してください。")
     if not USER_ID:
         raise RuntimeError(".env に USER_ID を設定してください。")
-    if POLL_INTERVAL_SECONDS < 10:
-        raise RuntimeError("POLL_INTERVAL_SECONDS は10以上にしてください。")
+    if POLL_INTERVAL_SECONDS < 3:
+        raise RuntimeError("POLL_INTERVAL_SECONDS は3以上にしてください。")
 
     client.run(DISCORD_TOKEN)
 
