@@ -351,9 +351,10 @@ def make_driver():
             f"CHROMEDRIVER_PATH={driver_path}\n"
             f"CHROME_USER_DATA_DIR={user_data_dir}\n"
             f"Original error: {e}\n\n"
-            "If CHROME_BINARY is /snap/bin/chromium and CHROMEDRIVER_PATH is "
-            "/usr/bin/chromedriver, try removing CHROMEDRIVER_PATH from .env "
-            "so Selenium can choose a compatible driver."
+            "If CHROME_BINARY is /snap/bin/chromium and the original error says "
+            "'Chrome instance exited', Snap Chromium is probably not starting "
+            "correctly under ChromeDriver. Install the deb version of Google Chrome "
+            "or Chromium and point CHROME_BINARY at that executable."
         ) from e
     return driver
 
