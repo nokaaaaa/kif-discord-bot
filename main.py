@@ -1352,6 +1352,13 @@ def kif_text_to_lishogi_url(kif_text: str) -> str:
     return import_kif_to_lishogi(get_poll_driver(), kif_text)
 
 
+def is_allowed_message_channel(message: discord.Message) -> bool:
+    if message.guild is None:
+        return True
+
+    return bool(CHANNEL_ID) and message.channel.id == int(CHANNEL_ID)
+
+
 async def poll_shogi_extend() -> None:
     global last_kif_hash
 
@@ -1402,7 +1409,7 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    if CHANNEL_ID and message.channel.id != int(CHANNEL_ID):
+    if not is_allowed_message_channel(message):
         return
 
     shogiwars_url = extract_shogiwars_game_url(message.content)
