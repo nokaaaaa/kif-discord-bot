@@ -8,7 +8,6 @@ import traceback
 from urllib.parse import urlparse
 
 import discord
-import pyperclip
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException
@@ -127,6 +126,54 @@ def click_copy_button(driver):
     time.sleep(1.0)
 
 
+def grant_clipboard_permission(driver, url: str) -> None:
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    driver.execute_cdp_cmd(
+        "Browser.grantPermissions",
+        {
+            "origin": origin,
+            "permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"],
+        },
+    )
+
+
+def write_browser_clipboard(driver, text: str) -> None:
+    error = driver.execute_async_script(
+        """
+        const text = arguments[0];
+        const done = arguments[arguments.length - 1];
+
+        navigator.clipboard.writeText(text).then(
+            () => done(null),
+            (error) => done(String(error))
+        );
+        """,
+        text,
+    )
+
+    if error:
+        raise RuntimeError(f"ブラウザのクリップボードへ書き込めませんでした: {error}")
+
+
+def read_browser_clipboard(driver) -> str:
+    result = driver.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+
+        navigator.clipboard.readText().then(
+            (text) => done({ text }),
+            (error) => done({ error: String(error) })
+        );
+        """
+    )
+
+    if result.get("error"):
+        raise RuntimeError(f"ブラウザのクリップボードを読めませんでした: {result['error']}")
+
+    return result.get("text", "")
+
+
 def get_kif_from_kishin(driver, url: str) -> str:
     """
     棋神アナリティクスURLを開き、KIFをクリップボードから取得する。
@@ -135,7 +182,8 @@ def get_kif_from_kishin(driver, url: str) -> str:
     driver.get(url)
     time.sleep(3.0)
 
-    pyperclip.copy("")
+    grant_clipboard_permission(driver, url)
+    write_browser_clipboard(driver, "")
 
     print("棋譜を出力ボタンをクリックします...")
     click_export_kifu_button(driver)
@@ -143,7 +191,7 @@ def get_kif_from_kishin(driver, url: str) -> str:
     print("KIFコピー按钮をクリックします...")
     click_copy_button(driver)
 
-    copied = pyperclip.paste()
+    copied = read_browser_clipboard(driver)
 
     print("クリップボード文字数:", len(copied))
 
