@@ -25,6 +25,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 LISHOGI_USERNAME = os.getenv("LISHOGI_USERNAME")
 LISHOGI_PASSWORD = os.getenv("LISHOGI_PASSWORD")
 USER_ID = os.getenv("USER_ID")
+PASSWORD = os.getenv("PASSWORD")
 CHROME_BINARY = os.getenv("CHROME_BINARY")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH")
 
@@ -96,6 +97,10 @@ def find_topmost_kishin_url_on_history(driver, history_url: str) -> str:
 
     wait = WebDriverWait(driver, 20)
     wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+    if "/loginm" in urlparse(driver.current_url).path:
+        login_to_shogiwars(driver, history_url)
+
     time.sleep(3.0)
 
     scroll_height = driver.execute_script(
@@ -144,6 +149,94 @@ def find_topmost_kishin_url_on_history(driver, history_url: str) -> str:
     target = min(candidates, key=lambda candidate: (candidate["y"], candidate["x"], candidate["index"]))
     print("選択した Kishin ボタン:", target)
     return target["url"]
+
+
+def login_to_shogiwars(driver, after_login_url: str) -> None:
+    """
+    Shogi Wars にログインし、ログイン後に指定URLを開き直す。
+    """
+    if not USER_ID or not PASSWORD:
+        raise RuntimeError(".env に USER_ID と PASSWORD を設定してください。")
+
+    print("Shogi Wars にログインします...")
+    wait = WebDriverWait(driver, 20)
+
+    username_selectors = [
+        "input[name='user_id']",
+        "input[name='userid']",
+        "input[name='login_id']",
+        "input[name='id']",
+        "input[autocomplete='username']",
+        "input[type='text']",
+        "input[type='email']",
+    ]
+    password_selectors = [
+        "input[name='password']",
+        "input[autocomplete='current-password']",
+        "input[type='password']",
+    ]
+
+    username_input = wait.until(lambda d: find_first_visible_css(d, username_selectors))
+    password_input = wait.until(lambda d: find_first_visible_css(d, password_selectors))
+
+    username_input.clear()
+    username_input.send_keys(USER_ID)
+
+    password_input.clear()
+    password_input.send_keys(PASSWORD)
+
+    submit_selectors = [
+        "button[type='submit']",
+        "input[type='submit']",
+        "input[type='image']",
+        "button",
+        "[role='button']",
+    ]
+    submit_button = find_first_visible_css(driver, submit_selectors)
+    before_url = driver.current_url
+
+    if submit_button is not None:
+        ActionChains(driver).move_to_element(submit_button).click().perform()
+    else:
+        driver.execute_script(
+            """
+            const input = arguments[0];
+            const form = input.form || document.querySelector('form');
+            if (!form) {
+                throw new Error('login form was not found');
+            }
+            form.submit();
+            """,
+            password_input,
+        )
+
+    print("Shogi Wars のログイン完了を待っています...")
+
+    def login_finished(d):
+        current_path = urlparse(d.current_url).path
+        visible_password = find_visible(d, By.CSS_SELECTOR, "input[type='password']")
+        return current_path != "/loginm" or d.current_url != before_url or visible_password is None
+
+    try:
+        wait.until(login_finished)
+    except TimeoutException as e:
+        body_text = driver.find_element(By.TAG_NAME, "body").text[:500]
+        raise RuntimeError(
+            "Shogi Wars のログイン完了を待ちましたが、ログインページから移動しませんでした。"
+            " USER_ID と PASSWORD を確認してください。"
+            f" ページ内容: {body_text}"
+        ) from e
+
+    if "/loginm" in urlparse(driver.current_url).path:
+        body_text = driver.find_element(By.TAG_NAME, "body").text[:500]
+        raise RuntimeError(
+            "Shogi Wars へのログインに失敗しました。USER_ID と PASSWORD を確認してください。"
+            f" ページ内容: {body_text}"
+        )
+
+    driver.get(after_login_url)
+    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    print("Shogi Wars にログインしました。")
 
 
 def collect_kishin_candidates_on_page(driver):
@@ -683,6 +776,8 @@ def main():
         raise RuntimeError(".env に LISHOGI_USERNAME と LISHOGI_PASSWORD を設定してください。")
     if not USER_ID:
         raise RuntimeError(".env に USER_ID を設定してください。")
+    if not PASSWORD:
+        raise RuntimeError(".env に PASSWORD を設定してください。")
 
     client.run(DISCORD_TOKEN)
 
