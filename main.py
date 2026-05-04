@@ -44,8 +44,10 @@ CHROME_BINARY_PATH_CANDIDATES = (
 )
 
 KISHIN_URL_RE = re.compile(
-    r"(?:https?://)?kishin-analytics\.heroz\.jp(?:/[^\s<>]*)?"
+    r"(?:https?://)?kishin-analytics\.heroz\.jp/[^\s<>]+"
 )
+
+CLIPBOARD_SENTINEL = "__KISHIN_DISCORD_BOT_EMPTY_CLIPBOARD__"
 
 
 def is_kishin_url(url: str) -> bool:
@@ -196,6 +198,27 @@ def read_browser_clipboard(driver) -> str:
     return result.get("text", "")
 
 
+def is_kif_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    if re.match(r"https?://", stripped):
+        return False
+
+    kif_markers = (
+        "#KIF",
+        "開始日時",
+        "終了日時",
+        "棋戦",
+        "先手",
+        "後手",
+        "手合割",
+        "手数----指手",
+    )
+    return any(marker in stripped for marker in kif_markers)
+
+
 def get_kif_from_kishin(driver, url: str) -> str:
     """
     棋神アナリティクスURLを開き、KIFをクリップボードから取得する。
@@ -206,7 +229,7 @@ def get_kif_from_kishin(driver, url: str) -> str:
 
     grant_clipboard_permission(driver, url)
     try:
-        write_browser_clipboard(driver, "")
+        write_browser_clipboard(driver, CLIPBOARD_SENTINEL)
     except RuntimeError as e:
         print(f"クリップボードの初期化をスキップします: {e}")
 
@@ -223,6 +246,13 @@ def get_kif_from_kishin(driver, url: str) -> str:
 
     if not copied.strip():
         raise RuntimeError("クリップボードが空です。コピーに失敗しました。")
+
+    if copied.strip() == CLIPBOARD_SENTINEL or not is_kif_text(copied):
+        preview = copied.strip().replace("\n", "\\n")[:200]
+        raise RuntimeError(
+            "Kishinから新しいKIFをコピーできませんでした。古いクリップボード内容、"
+            f"またはKIFではない内容を検出したため中止します。内容: {preview}"
+        )
 
     return copied
 
