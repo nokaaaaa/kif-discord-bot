@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import re
 import shutil
@@ -22,11 +23,14 @@ from selenium.webdriver.support import expected_conditions as EC
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 LISHOGI_USERNAME = os.getenv("LISHOGI_USERNAME")
 LISHOGI_PASSWORD = os.getenv("LISHOGI_PASSWORD")
 USER_ID = os.getenv("USER_ID")
 CHROME_BINARY = os.getenv("CHROME_BINARY")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH")
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
+LAST_KIF_HASH_PATH = os.getenv("LAST_KIF_HASH_PATH", ".last_kif_hash")
 
 CHROME_BINARY_CANDIDATES = (
     "google-chrome",
@@ -631,48 +635,123 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 selenium_lock = asyncio.Lock()
+polling_task: asyncio.Task | None = None
+last_kif_hash: str | None = None
+
+
+def kif_hash(kif_text: str) -> str:
+    return hashlib.sha256(kif_text.strip().encode("utf-8")).hexdigest()
+
+
+def load_last_kif_hash() -> str | None:
+    if not os.path.exists(LAST_KIF_HASH_PATH):
+        return None
+
+    with open(LAST_KIF_HASH_PATH, encoding="utf-8") as f:
+        value = f.read().strip()
+
+    return value or None
+
+
+def save_last_kif_hash(value: str) -> None:
+    with open(LAST_KIF_HASH_PATH, "w", encoding="utf-8") as f:
+        f.write(f"{value}\n")
+
+
+def shogi_extend_latest_kif(user_id: str) -> str:
+    driver = make_driver()
+
+    try:
+        return get_kif_from_shogi_extend(driver, user_id)
+
+    finally:
+        user_data_dir = getattr(driver, "_kishin_user_data_dir", None)
+        driver.quit()
+        if user_data_dir:
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+
+
+def kif_text_to_lishogi_url(kif_text: str) -> str:
+    driver = make_driver()
+
+    try:
+        return import_kif_to_lishogi(driver, kif_text)
+
+    finally:
+        user_data_dir = getattr(driver, "_kishin_user_data_dir", None)
+        driver.quit()
+        if user_data_dir:
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+
+
+async def poll_shogi_extend() -> None:
+    global last_kif_hash
+
+    await client.wait_until_ready()
+    last_kif_hash = load_last_kif_hash()
+
+    channel = client.get_channel(int(CHANNEL_ID))
+    if channel is None:
+        channel = await client.fetch_channel(int(CHANNEL_ID))
+
+    while not client.is_closed():
+        try:
+            async with selenium_lock:
+                if last_kif_hash is None:
+                    kif_text = await asyncio.to_thread(shogi_extend_latest_kif, USER_ID)
+                    last_kif_hash = kif_hash(kif_text)
+                    save_last_kif_hash(last_kif_hash)
+                    print("最新KIFを初期状態として記録しました。")
+                else:
+                    kif_text = await asyncio.to_thread(shogi_extend_latest_kif, USER_ID)
+                    current_hash = kif_hash(kif_text)
+
+                    if current_hash != last_kif_hash:
+                        lishogi_url = await asyncio.to_thread(
+                            kif_text_to_lishogi_url,
+                            kif_text,
+                        )
+                        await channel.send(f"新しい棋譜をlishogiに読み込みました。\n{lishogi_url}")
+                        last_kif_hash = current_hash
+                        save_last_kif_hash(last_kif_hash)
+                    else:
+                        print("新しいKIFはありません。")
+
+        except Exception:
+            traceback.print_exc()
+
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
 @client.event
 async def on_ready():
+    global polling_task
+
     print(f"ログインしました: {client.user}")
+    if polling_task is None or polling_task.done():
+        polling_task = asyncio.create_task(poll_shogi_extend())
 
 
 @client.event
 async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-
-    if message.content.strip().lower() != "go":
-        return
-
-    async with selenium_lock:
-        await message.channel.send("shogi-extendから棋譜をコピーして、lishogiに読み込ませています...")
-
-        try:
-            lishogi_url = await asyncio.to_thread(shogi_extend_to_lishogi_url, USER_ID)
-
-            await message.reply(
-                content=f"lishogiに読み込みました。\n{lishogi_url}",
-                mention_author=False,
-            )
-
-        except Exception as e:
-            traceback.print_exc()
-
-            await message.reply(
-                f"lishogiへの読み込みに失敗しました。\n```text\n{e}\n```",
-                mention_author=False,
-            )
+    return
 
 
 def main():
     if not DISCORD_TOKEN:
         raise RuntimeError(".env に DISCORD_TOKEN が設定されていません。")
+    if not CHANNEL_ID:
+        raise RuntimeError(".env に CHANNEL_ID を設定してください。")
+    try:
+        int(CHANNEL_ID)
+    except ValueError as e:
+        raise RuntimeError(".env の CHANNEL_ID は数字で設定してください。") from e
     if not LISHOGI_USERNAME or not LISHOGI_PASSWORD:
         raise RuntimeError(".env に LISHOGI_USERNAME と LISHOGI_PASSWORD を設定してください。")
     if not USER_ID:
         raise RuntimeError(".env に USER_ID を設定してください。")
+    if POLL_INTERVAL_SECONDS < 10:
+        raise RuntimeError("POLL_INTERVAL_SECONDS は10以上にしてください。")
 
     client.run(DISCORD_TOKEN)
 

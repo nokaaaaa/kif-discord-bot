@@ -1,4 +1,5 @@
 .env
+.last_kif_hash
 .venv/
 
 __pycache__/

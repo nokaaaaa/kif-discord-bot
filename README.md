@@ -1,6 +1,6 @@
 # Kishin Discord Bot
 
-Discord に `go` と投稿すると、shogi-extend の検索結果から一番上にある『コピー』ボタンを押して棋譜を取得し、lishogi に読み込ませる bot です。
+shogi-extend の検索結果を定期的に確認し、新しい棋譜が取れるようになったら lishogi に読み込ませて Discord にURLを投稿する bot です。
 
 ## Server Requirements
 
@@ -29,7 +29,10 @@ The bot also requires:
 
 ```env
 DISCORD_TOKEN=...
+CHANNEL_ID=...
 USER_ID=...
 LISHOGI_USERNAME=...
 LISHOGI_PASSWORD=...
+POLL_INTERVAL_SECONDS=60
+LAST_KIF_HASH_PATH=.last_kif_hash
 ```
