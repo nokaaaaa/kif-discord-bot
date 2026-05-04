@@ -44,7 +44,7 @@ CHROME_BINARY_PATH_CANDIDATES = (
 )
 
 KISHIN_URL_RE = re.compile(
-    r"(?:https?://)?kishin-analytics\.heroz\.jp/[^\s<>]+"
+    r"(?:https?://)?kishin-analytics\.heroz\.jp(?:/[^\s<>]*)?(?:\?[^\s<>]*)?"
 )
 
 CLIPBOARD_SENTINEL = "__KISHIN_DISCORD_BOT_EMPTY_CLIPBOARD__"
